@@ -143,6 +143,9 @@ class DenIntegratorThread: public Thread {
                         int compute_potential_integrals,
                         int need_nuclear_gradient);
     virtual ~DenIntegratorThread();
+    pair<double,double> do_point(int iatom, const SCVector3 &r,
+                    double *nuclear_gradient,
+                    double *f_gradient, double *w_gradient);
     double do_point(int iatom, const SCVector3 &r,
                     double weight, double multiplier,
                     double *nuclear_gradient,
@@ -164,6 +167,7 @@ DenIntegratorThread::DenIntegratorThread(int ithread, int nthread,
                                          int need_nuclear_gradient)
 {
   value_ = 0.0;
+
 
   den_ = den;
   ithread_ = ithread;
@@ -366,16 +370,16 @@ DenIntegrator::done_integration()
     }
 }
 
-double
+//Mine, returns a pair of charge and energy density without weighing them.
+pair<double,double>
 DenIntegratorThread::do_point(int iatom, const SCVector3 &r,
-                        double weight, double multiplier,
                         double *nuclear_gradient,
                         double *f_gradient, double *w_gradient)
 {
   int i,j;
-  double w_mult = weight * multiplier;
+  double w_mult = 1;
 
-  CHECK_ALIGN(w_mult);
+  //CHECK_ALIGN(w_mult);
 
   PointInputData id(r);
 
@@ -403,6 +407,161 @@ DenIntegratorThread::do_point(int iatom, const SCVector3 &r,
           func_->point(id, od);
         }
       else {
+	  throw runtime_error("Trying to use uninitalized variable f_gradient");
+          func_->gradient(id, od, f_gradient, iatom, basis_,
+                          den_->alpha_density_matrix(),
+                          den_->beta_density_matrix(),
+                          ncontrib, contrib,
+                          ncontrib_bf, contrib_bf,
+                          bs_values, bsg_values,
+                          bsh_values);
+        }
+    }
+  else {
+      return pair<double,double> (id.a.rho + id.b.rho, 0);
+    }
+  
+  //value_ += od.energy * w_mult;
+
+  if (compute_potential_integrals_) {
+      // the contribution to the potential integrals
+      if (need_gradient_) {
+          double gradsa[3], gradsb[3];
+          gradsa[0] = w_mult*(2.0*od.df_dgamma_aa*id.a.del_rho[0] +
+                                  od.df_dgamma_ab*id.b.del_rho[0]);
+          gradsa[1] = w_mult*(2.0*od.df_dgamma_aa*id.a.del_rho[1] +
+                                 od.df_dgamma_ab*id.b.del_rho[1]);
+          gradsa[2] = w_mult*(2.0*od.df_dgamma_aa*id.a.del_rho[2] +
+                                  od.df_dgamma_ab*id.b.del_rho[2]);
+          double drhoa = w_mult*od.df_drho_a, drhob=0.0;
+          if (spin_polarized_) {
+              drhob = w_mult*od.df_drho_b;
+              gradsb[0] = w_mult*(2.0*od.df_dgamma_bb*id.b.del_rho[0] +
+                                      od.df_dgamma_ab*id.a.del_rho[0]);
+              gradsb[1] = w_mult*(2.0*od.df_dgamma_bb*id.b.del_rho[1] +
+                                      od.df_dgamma_ab*id.a.del_rho[1]);
+              gradsb[2] = w_mult*(2.0*od.df_dgamma_bb*id.b.del_rho[2] +
+                                      od.df_dgamma_ab*id.a.del_rho[2]);
+            }
+
+          for (int j=0; j<ncontrib_bf; j++) {
+              int jt = contrib_bf[j];
+              double dfdra_phi_m = drhoa*bs_values[j];
+              double dfdga_phi_m = gradsa[0]*bsg_values[j*3+0] +
+                                   gradsa[1]*bsg_values[j*3+1] +
+                                   gradsa[2]*bsg_values[j*3+2];
+              double vamu = dfdra_phi_m + dfdga_phi_m, vbmu=0.0;
+              double dfdrb_phi_m, dfdgb_phi_m;
+              if (spin_polarized_) {
+                  dfdrb_phi_m = drhob*bs_values[j];
+                  dfdgb_phi_m = gradsb[0]*bsg_values[j*3+0] +
+                                       gradsb[1]*bsg_values[j*3+1] +
+                                       gradsb[2]*bsg_values[j*3+2];
+                  vbmu = dfdrb_phi_m + dfdgb_phi_m;
+                }
+
+              int jtoff = (jt*(jt+1))>>1;
+
+              for (int k=0; k <= j; k++) {
+                  int kt = contrib_bf[k];
+                  int jtkt = jtoff + kt;
+
+                  double dfdga_phi_n = gradsa[0]*bsg_values[k*3+0] +
+                                       gradsa[1]*bsg_values[k*3+1] +
+                                       gradsa[2]*bsg_values[k*3+2];
+                  alpha_vmat_[jtkt] += vamu * bs_values[k] +
+                                     dfdga_phi_n * bs_values[j];
+                  if (spin_polarized_) {
+                      double dfdgb_phi_n = gradsb[0]*bsg_values[k*3+0] +
+                                           gradsb[1]*bsg_values[k*3+1] +
+                                           gradsb[2]*bsg_values[k*3+2];
+                      beta_vmat_[jtkt] += vbmu * bs_values[k] +
+                                          dfdgb_phi_n * bs_values[j];
+                    }
+                }
+            }
+        }
+      else {
+          double drhoa = w_mult*od.df_drho_a;
+          double drhob = w_mult*od.df_drho_b;
+          for (int j=0; j<ncontrib_bf; j++) {
+              int jt = contrib_bf[j];
+              double bsj = bs_values[j];
+              double dfa_phi_m = drhoa * bsj;
+              double dfb_phi_m = drhob * bsj;
+              int jtoff = (jt*(jt+1))>>1;
+              for (int k=0; k <= j; k++) {
+                  int kt = contrib_bf[k];
+                  int jtkt = jtoff + kt;
+                  double bsk = bs_values[k];
+                  alpha_vmat_[jtkt] += dfa_phi_m * bsk;
+                  if (spin_polarized_)
+                      beta_vmat_[jtkt] += dfb_phi_m * bsk;
+                }
+            }
+        }
+    }
+
+  if (nuclear_gradient != 0) {
+      // the contribution from f dw/dx
+      throw runtime_error("Trying to use uninitalized variable nuclear_gradient");
+      if (w_gradient) {
+          for (int icenter = 0; icenter<n_integration_center_; icenter++) {
+              int iatom = basis_->molecule()->non_q_atom(icenter);
+              for (int ixyz=0; ixyz<3; ixyz++) {
+                  nuclear_gradient[iatom*3+ixyz]
+                      += w_gradient[icenter*3+ixyz] * od.energy;// * multiplier;
+                }
+            }
+        }
+      // the contribution from (df/dx) w
+      for (i=0; i<natom_*3; i++) {
+          nuclear_gradient[i] += f_gradient[i] * w_mult;
+        }
+    }
+
+  return pair<double,double>(id.a.rho + id.b.rho, od.energy);
+}
+
+//Original
+double
+DenIntegratorThread::do_point(int iatom, const SCVector3 &r,
+                        double weight, double multiplier,
+                        double *nuclear_gradient,
+                        double *f_gradient, double *w_gradient)
+{
+  int i,j;
+  double w_mult = weight * multiplier;
+
+  //CHECK_ALIGN(w_mult);
+
+  PointInputData id(r);
+
+  den_->compute_density(r,
+                        &id.a.rho,
+                        (need_gradient_?id.a.del_rho:0),
+                        (need_hessian_?id.a.hes_rho:0),
+                        &id.b.rho,
+                        (need_gradient_?id.b.del_rho:0),
+                        (need_hessian_?id.b.hes_rho:0));
+
+  id.compute_derived(spin_polarized_, need_gradient_, need_hessian_);
+
+  int ncontrib = den_->ncontrib();
+  int *contrib = den_->contrib();
+  int ncontrib_bf = den_->ncontrib_bf();
+  int *contrib_bf = den_->contrib_bf();
+  double *bs_values = den_->bs_values();
+  double *bsg_values = den_->bsg_values();
+  double *bsh_values = den_->bsh_values();
+
+  PointOutputData od;
+  if ( (id.a.rho + id.b.rho) > 1e2*DBL_EPSILON) {
+      if (nuclear_gradient == 0) {
+          func_->point(id, od);
+        }
+      else {
+	  throw runtime_error("Trying to use uninitalized variable f_gradient");
           func_->gradient(id, od, f_gradient, iatom, basis_,
                           den_->alpha_density_matrix(),
                           den_->beta_density_matrix(),
@@ -499,6 +658,7 @@ DenIntegratorThread::do_point(int iatom, const SCVector3 &r,
 
   if (nuclear_gradient != 0) {
       // the contribution from f dw/dx
+      throw runtime_error("Trying to use uninitalized variable nuclear_gradient");
       if (w_gradient) {
           for (int icenter = 0; icenter<n_integration_center_; icenter++) {
               int iatom = basis_->molecule()->non_q_atom(icenter);
@@ -1429,6 +1589,14 @@ class RadialAngularIntegratorThread: public DenIntegratorThread {
     IntegrationWeight *weight_;
     int point_count_total_;
     double total_density_;
+    
+    //ran0 az MC-hez
+    const static int ran_m_ = 2147483647, ran_a_ = 16807, ran_q_ = 127773, ran_r_ = 2836;
+    const static double M_RAN_INVM32_ = 2.32830643653869628906e-010;
+    
+    int ran0(int* state);
+    double randd(double lbound, double ubound, int* state);
+    
   public:
     RadialAngularIntegratorThread(int ithread, int nthread,
                                   RadialAngularIntegrator *integrator,
@@ -1502,58 +1670,116 @@ RadialAngularIntegratorThread::~RadialAngularIntegratorThread()
   delete[] nr_;
 }
 
+int
+RadialAngularIntegratorThread::ran0(int* state)
+{
+    int h = (*state) / ran_q_;
+    *state = ran_a_ * ((*state) - h * ran_q_) - h * ran_r_;
+
+    if (*state < 0) (*state) += ran_m_;
+    return *state;
+}
+ 
+double 
+RadialAngularIntegratorThread::randd(double lbound, double ubound, int* state)
+{
+    int uiRan = ran0(state);
+    //stringstream ss;
+    //ss << uiRan << " * " << M_RAN_INVM32_ << " * " << (ubound-lbound) << " + " << lbound << " = " << uiRan * M_RAN_INVM32_ * (ubound-lbound) + lbound;
+    //throw runtime_error(ss.str());
+    return uiRan * M_RAN_INVM32_ * 2 * (ubound-lbound) + lbound;
+}
+
 void
 RadialAngularIntegratorThread::run()
 {
-  int icenter;
-  int nangular;
-  int ir, iangular;           // Loop indices for diff. integration dim
-  int point_count;            // Counter for # integration points per center
-  int nr;
+    int icenter;
+    int nangular;
+    int ir, iangular;           // Loop indices for diff. integration dim
+    int point_count;            // Counter for # integration points per center
+    int nr;
 
-  SCVector3 center;           // Cartesian position of center
-  SCVector3 integration_point;
+    SCVector3 center;           // Cartesian position of center
+    SCVector3 integration_point;
 
-  double w,radial_multiplier,angular_multiplier;
-  int deriv_order = (nuclear_gradient_==0?0:1);
-        
-  int parallel_counter = 0;
-
-  for (icenter=0; icenter < n_integration_center_; icenter++) {
-      int iatom = mol_->non_q_atom(icenter);
-      point_count=0;
-      center = centers_[icenter];
-      // get current radial grid: depends on convergence threshold
-      RadialIntegrator *radial
-          = ra_integrator_->get_radial_grid(mol_->Z(iatom), deriv_order);
-      nr = radial->nr();
-      for (ir=0; ir < nr; ir++) {
-          if (! (parallel_counter++%nthread_ == ithread_)) continue;
-          double r = radial->radial_value(ir, nr, atomic_radius_[icenter],
-                                          radial_multiplier);
-          // get current angular grid: depends on radial point and threshold
-          AngularIntegrator *angular
-              = ra_integrator_->get_angular_grid(r, atomic_radius_[icenter],
-                                                 mol_->Z(iatom),
-						 deriv_order);
-          nangular = angular->num_angular_points(r/atomic_radius_[icenter],ir);
-          for (iangular=0; iangular<nangular; iangular++) {
-              angular_multiplier
-                  = angular->angular_point_cartesian(iangular,r,
-                                                     integration_point);
-              integration_point += center;
-              w=weight_->w(icenter, integration_point, w_gradient_);
-              point_count++;
-              double multiplier = angular_multiplier * radial_multiplier;
-              total_density_
-                  += w * multiplier
-                  * do_point(iatom, integration_point,
-                             w, multiplier,
-                             nuclear_gradient_, f_gradient_, w_gradient_);
-            }
-        }
-      point_count_total_ += point_count;
+    double w,radial_multiplier,angular_multiplier;
+    int deriv_order = (nuclear_gradient_==0?0:1);
+	  
+    int parallel_counter = 0;
+    
+    stringstream sso, ssi;
+    sso << secure_getenv("HOME") << "/Documents/mpqc-files/og.o";
+    //ssi << secure_getenv("HOME") << "/Documents/mpqc-files/grid.i";
+    ofstream ofs(sso.str().c_str());
+    //ifstream ifs(ssi.str().c_str());
+    
+    if(!ofs.is_open())
+    {
+	sso << " <- file cannot be opened for writing.";
+	throw std::runtime_error(sso.str());
     }
+    
+    
+//     if(!ifs.is_open())
+//     {
+// 	ssi << " <- file cannot be opened for reading.";
+// 	throw std::runtime_error(ssi.str());
+//     }
+    
+    ofs << "#nthread_: " << nthread_ << endl;
+    ofs << "#order: x y z density energy error acc" << endl;
+    
+    mol_->move_to_coc();
+    mol_->transform_to_charge_principal_axes();
+    
+    point_count_total_ = 0;
+    int point_count_max = 2000000;
+    double bound_size = 10.0;
+    int rstate = 567890123;
+    double point_den;
+    double n_e = mol_->total_charge();
+    double delta_e = 0.0005;
+    int acc = 0;
+    pair<double,double> q_e_pair; //charge,energy
+    
+    ofs << "#number of electrons: " << n_e << endl;
+    
+    while(acc < 10 && point_count_total_ < point_count_max )
+    {
+      integration_point.x() = randd(-bound_size,bound_size,&rstate);
+      integration_point.y() = randd(-bound_size,bound_size,&rstate);
+      integration_point.z() = randd(-bound_size,bound_size,&rstate);
+      
+      ofs << setw(14) << integration_point.x() << " " 
+	  << setw(14) << integration_point.y() << " "
+	  << setw(14) << integration_point.z() << " ";
+	  
+      q_e_pair = do_point(0, integration_point,
+			      nuclear_gradient_, f_gradient_, w_gradient_);
+      
+      ofs << setw(14) << point_den << " ";
+      
+      total_density_ += q_e_pair.first;
+      value_ += q_e_pair.second;
+      ++point_count_total_;
+      
+      ofs << setw(14) << fabs((total_density_ * bound_size * bound_size * bound_size * 8 / point_count_total_) - n_e) << " ";
+      
+      if(fabs((total_density_ * bound_size * bound_size * bound_size * 8 / point_count_total_) - n_e) < delta_e) 
+	++acc;
+      else if(acc > 0) 
+	--acc;
+      
+      ofs << setw(14) << acc << endl;
+    }
+    
+    total_density_ = total_density_ * bound_size * bound_size * bound_size * 8 / point_count_total_;
+    value_ = value_ * bound_size * bound_size * bound_size * 8 / point_count_total_;
+    
+    ofs << "#point_count_total_: " << point_count_total_ << endl;
+    
+    //ifs.close();
+    ofs.close();
 }
 
 //////////////////////////////////////////////

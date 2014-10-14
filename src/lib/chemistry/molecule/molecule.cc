@@ -574,6 +574,26 @@ Molecule::center_of_mass() const
   return ret;
 }
 
+SCVector3
+Molecule::center_of_charge() const
+{
+  SCVector3 ret;
+  double M;
+
+  ret = 0.0;
+  M = 0.0;
+
+  for (int i=0; i < natom(); i++) {
+    double m = charge(i);
+    ret += m * SCVector3(r(i));
+    M += m;
+  }
+
+  ret *= 1.0/M;
+
+  return ret;
+}
+
 double
 Molecule::nuclear_repulsion_energy()
 {
@@ -857,6 +877,14 @@ Molecule::move_to_com()
   translate(com.data());
 }
 
+void
+Molecule::move_to_coc()
+{
+  SCVector3 com = -center_of_charge();
+  translate(com.data());
+}
+
+
 // find the 3 principal coordinate axes, and rotate the molecule to be
 // aligned along them.  also rotate the symmetry frame contained in point_group
 void
@@ -878,6 +906,85 @@ Molecule::transform_to_principal_axes(int trans_frame)
   for (i=0; i < natom(); i++) {
     SCVector3 ac(r(i));
     double m=mass(i);
+    inert[0][0] += m * (ac[1]*ac[1] + ac[2]*ac[2]);
+    inert[1][0] -= m * ac[0]*ac[1];
+    inert[1][1] += m * (ac[0]*ac[0] + ac[2]*ac[2]);
+    inert[2][0] -= m * ac[0]*ac[2];
+    inert[2][1] -= m * ac[1]*ac[2];
+    inert[2][2] += m * (ac[0]*ac[0] + ac[1]*ac[1]);
+  }
+
+  inert[0][1] = inert[1][0];
+  inert[0][2] = inert[2][0];
+  inert[1][2] = inert[2][1];
+
+ // cleanup inert
+  for (i=0; i < 3; i++) {
+    for (int j=0; j <= i; j++) {
+      if (fabs(inert[i][j]) < 1.0e-5) {
+        inert[i][j]=inert[j][i]=0.0;
+      }
+    }
+  }
+
+  cmat_diag(inert, evals, evecs, 3, 1, 1e-14);
+
+ // cleanup evecs
+  for (i=0; i < 3; i++) {
+    for (int j=0; j < 3; j++) {
+      if (fabs(evecs[i][j]) < 1.0e-5) {
+        evecs[i][j]=0.0;
+      }
+    }
+  }
+
+  for (i=0; i<natom(); i++) {
+      double a[3];
+      a[0] = r(i,0); a[1] = r(i,1); a[2] = r(i,2);
+      for (j=0; j<3; j++) {
+          double e = 0.0;
+          for (k=0; k<3; k++) {
+              e += a[k] * evecs[k][j];
+            }
+          atoms_[i].r(j) = e;
+        }
+    }
+
+  if (!trans_frame) return;
+
+  SymmetryOperation tso=point_group()->symm_frame();
+
+  for (i=0; i < 3; i++) {
+    for (int j=0; j < 3; j++) {
+      double t=0;
+      for (int k=0; k < 3; k++) t += tso[k][j]*evecs[k][i];
+      pg_->symm_frame()[i][j] = t;
+    }
+  }
+}
+
+
+// find the 3 principal coordinate axes based on charge, not mass, and rotate the molecule to be
+// aligned along them.  also rotate the symmetry frame contained in point_group
+void
+Molecule::transform_to_charge_principal_axes(int trans_frame)
+{
+  //mol_move_to_coc(mol);
+
+  double *inert[3], inert_dat[9], *evecs[3], evecs_dat[9];
+  double evals[3];
+
+  int i,j,k;
+  for (i=0; i < 3; i++) {
+    inert[i] = &inert_dat[i*3];
+    evecs[i] = &evecs_dat[i*3];
+  }
+  memset(inert_dat,'\0',sizeof(double)*9);
+  memset(evecs_dat,'\0',sizeof(double)*9);
+
+  for (i=0; i < natom(); i++) {
+    SCVector3 ac(r(i));
+    double m=charge(i);
     inert[0][0] += m * (ac[1]*ac[1] + ac[2]*ac[2]);
     inert[1][0] -= m * ac[0]*ac[1];
     inert[1][1] += m * (ac[0]*ac[0] + ac[2]*ac[2]);

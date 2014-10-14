@@ -386,6 +386,7 @@ class Molecule: public SavableState
     /** Returns a SCVector3 containing the cartesian coordinates of
         the center of mass for the molecule. */
     SCVector3 center_of_mass() const;
+    SCVector3 center_of_charge() const;
 
     /// Returns the nuclear repulsion energy for the molecule
     double nuclear_repulsion_energy();
@@ -419,7 +420,11 @@ class Molecule: public SavableState
 
     void translate(const double *r);
     void move_to_com();
+    void move_to_coc();
+   
     void transform_to_principal_axes(int trans_frame=1);
+    void transform_to_charge_principal_axes(int trans_frame=1);
+   
     void transform_to_symmetry_frame();
     void print_xyz(std::ostream& =ExEnv::out0(), const char *title =0) const;
 
