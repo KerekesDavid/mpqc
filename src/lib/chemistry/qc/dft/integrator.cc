@@ -33,6 +33,9 @@
 #include <util/container/carray.h>
 #include <chemistry/qc/dft/integrator.h>
 
+#include <vector>
+#include <limits>
+
 using namespace std;
 using namespace sc;
 
@@ -145,9 +148,7 @@ public:
 	                    int compute_potential_integrals,
 	                    int need_nuclear_gradient);
 	virtual ~DenIntegratorThread();
-	pair<double,double> do_point(int iatom, const SCVector3 &r,
-	                             double *nuclear_gradient,
-	                             double *f_gradient, double *w_gradient);
+	pair<double,double> do_point(const SCVector3 &r);
 	double do_point(int iatom, const SCVector3 &r,
 	                double weight, double multiplier,
 	                double *nuclear_gradient,
@@ -163,6 +164,9 @@ public:
 	}
 	double value() {
 		return value_;
+	}
+	int nthread() {
+		return nthread_;
 	}
 };
 
@@ -381,12 +385,14 @@ DenIntegrator::done_integration()
 
 //Mine, returns a pair of charge and energy density without weighing them.
 pair<double,double>
-DenIntegratorThread::do_point(int iatom, const SCVector3 &r,
-                              double *nuclear_gradient,
-                              double *f_gradient, double *w_gradient)
+DenIntegratorThread::do_point(const SCVector3 &r)
 {
 	int i,j;
 	double w_mult = 1;
+	int iatom = 0;
+	double* nuclear_gradient = 0;
+	double* w_gradient = 0;
+	double*	f_gradient = 0;
 
 	//CHECK_ALIGN(w_mult);
 
@@ -1575,6 +1581,254 @@ GaussLegendreAngularIntegrator::print(ostream &o) const
 	o << decindent;
 }
 
+//MCResults
+///////////////////////////////
+//A helper struct for passing around integration results
+struct MCResults
+{
+	double charge;
+	double energy;
+	int point_count;
+	
+	MCResults(){}
+	MCResults(double c, double e, int p_c):charge(c), energy(e), point_count(p_c){} 
+	
+	MCResults const operator+ (const MCResults &b)
+	{
+		MCResults a;
+		a.charge = charge + b.charge;
+		a.energy = charge + b.energy;
+		a.point_count = point_count + b.point_count;
+		return a;
+	}
+};
+
+//MonteCarloIntegrator
+///////////////////////////////
+
+class MonteCarloIntegrator
+{
+private:
+	Molecule* mol_;
+	DenIntegratorThread* rait_;
+	ofstream ofs_;
+	
+	//variables for ran0
+	int rstate_;
+	const static int ran_m_ = 2147483647, ran_a_ = 16807, ran_q_ = 127773, ran_r_ = 2836;
+	const static double M_RAN_INVM32_ = 2.32830643653869628906e-010;
+
+	//ran0 a MC-hoz
+	int ran0(int* state);
+	double randd(double lbound, double ubound, int* state);
+	
+	//miser state variables
+	int miser_calls_left_;
+	const static int miser_dim_ = 3;
+	
+	//miser
+	void miser_cut_sigma(	double *ubounds, double *lbound, 
+							vector<pair<double,double> > &values, vector<SCVector3> &coords, 
+							double *n_ubounds, double *n_lbounds, 
+							vector<pair<double,double> > &n_values, vector<SCVector3> &n_coords);
+					
+	MCResults miser_recurse(double *ubounds, double *lbounds, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth);
+	
+	//IO
+	void init_ofs();
+	void dest_ofs();
+	
+public:
+
+	MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int rstate = 567890123);
+	~MonteCarloIntegrator();
+		
+	MCResults miser_integrate();
+	MCResults mc_integrate();
+
+};
+
+MonteCarloIntegrator::MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int rstate)
+																	: mol_(mol), rait_(rait), rstate_(rstate)
+{
+	init_ofs();
+}
+
+MonteCarloIntegrator::~MonteCarloIntegrator()
+{
+	dest_ofs();
+}
+
+void MonteCarloIntegrator::init_ofs()
+{
+	stringstream sso;	
+	
+	sso << secure_getenv("HOME") << "/dev/mpqc-files/og.o";
+	ofs_.open(sso.str().c_str());
+
+	if(!ofs_.is_open()) {
+		sso << " <- file cannot be opened for writing.";
+		throw std::runtime_error(sso.str());
+	}
+
+	ofs_ << "#nthread_: " << rait_->nthread() << endl;
+	ofs_ << "#order: x y z density energy error acc" << endl;
+}
+
+void MonteCarloIntegrator::dest_ofs()
+{
+	ofs_.close();
+}
+
+int
+MonteCarloIntegrator::ran0(int* state)
+{
+	int h = (*state) / ran_q_;
+	*state = ran_a_ * ((*state) - h * ran_q_) - h * ran_r_;
+
+	if (*state < 0) (*state) += ran_m_;
+	return *state;
+}
+
+double
+MonteCarloIntegrator::randd(double lbound, double ubound, int* state)
+{
+	int uiRan = ran0(state);
+	return uiRan * M_RAN_INVM32_ * 2 * (ubound-lbound) + lbound;
+}
+
+void
+MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds,
+										vector<pair<double,double> > &values, vector<SCVector3> &coords, 
+										double* n_ubounds, double* n_lbounds, 
+										vector<pair<double,double> > &n_values, vector<SCVector3> &n_coords)
+{
+	int max_dim;
+	
+	for(int i = 0; i < miser_dim_; ++i)
+	{
+		double cut_bound = (ubounds[i]-lbounds[i])/2;
+		
+		int l_max_value = numeric_limits<int>::min();
+		int l_min_value = numeric_limits<int>::max();
+		int r_max_value = numeric_limits<int>::min();
+		int r_min_value = numeric_limits<int>::max();
+		
+		for(int j = 0; j < values.size(); ++j)
+		{
+			if(coords[j][i] > cut_bound)
+			{
+				if(values[j].first > l_max_value)
+					l_max_value = values[j].first;
+				if(values[j].first < l_min_value)
+					l_min_value = values[j].first;
+			}
+			else
+			{
+				if(values[j].first > r_max_value)
+					r_max_value = values[j].first;
+				if(values[j].first < r_min_value)
+					r_min_value = values[j].first;
+			}
+		}
+	}
+	
+}
+
+MCResults
+MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth)
+{	
+	MCResults sum; 		
+
+	if(depth != 0)
+	{
+		double n_ubounds[miser_dim_];
+		double n_lbounds[miser_dim_];
+		vector<pair<double,double> > n_values;
+		vector<SCVector3> n_coords;
+		
+		//miser_spray(ubounds, lbounds, values, );
+		miser_cut_sigma(ubounds, lbounds , values, coords, n_ubounds, n_lbounds, n_values, n_coords);
+		
+		MCResults temp_l = miser_recurse(ubounds, lbounds, values, coords, depth-1);
+		MCResults temp_r = miser_recurse(n_ubounds, n_lbounds, n_values, n_coords, depth-1);
+		
+		sum = temp_l + temp_r;
+	}
+	else
+	{
+		double w = 1;
+		for(int i = 0; i < miser_dim_; ++i)
+		{
+			w *= ubounds[i]-lbounds[i];
+		}
+		
+		for(int i = 0; i < values.size(); ++i)
+		{
+			sum.charge += values[i].first * w;
+			sum.energy += values[i].second * w;
+		}
+		
+		sum.charge /= values.size();
+		sum.energy /= values.size();
+	}
+	
+	return sum;
+}
+
+MCResults MonteCarloIntegrator::mc_integrate()
+{
+	SCVector3 integration_point;
+	
+	int point_count_max = 2000000;
+	int point_count_total;
+	double total_density, value;
+	double bound_size = 15.0;
+	double point_den;
+	double n_e = mol_->total_charge();
+	double delta_e = 0.0005;
+	int acc = 0;
+	pair<double,double> q_e_pair; //charge,energy
+	
+	ofs_ << "#number of electrons: " << n_e << endl;
+
+	while(acc < 10 && point_count_total < point_count_max ) {
+		integration_point.x() = randd(-bound_size,bound_size,&rstate_);
+		integration_point.y() = randd(-bound_size,bound_size,&rstate_);
+		integration_point.z() = randd(-bound_size,bound_size,&rstate_);
+
+		ofs_ << setw(14) << integration_point.x() << " "
+		    << setw(14) << integration_point.y() << " "
+		    << setw(14) << integration_point.z() << " ";
+
+		q_e_pair = rait_->do_point(integration_point);
+
+		ofs_ << setw(14) << point_den << " ";
+
+		total_density += q_e_pair.first;
+		value += q_e_pair.second;
+		++point_count_total;
+
+		ofs_ << setw(14) << fabs((total_density * bound_size * bound_size * bound_size * 8 / point_count_total) - n_e) << " ";
+
+		if(fabs((total_density * bound_size * bound_size * bound_size * 8 / point_count_total) - n_e) < delta_e)
+			++acc;
+		else if(acc > 0)
+			--acc;
+
+		ofs_ << setw(14) << acc << endl;
+	}
+	
+	ofs_ << "#point_count_total_: " << point_count_total << endl;
+
+	double w = bound_size * bound_size * bound_size * 8 / point_count_total;
+
+	total_density = total_density * w;
+	value = value * w;
+	
+	return MCResults(total_density, value, point_count_total);
+}
+
 //////////////////////////////////////////////
 //  RadialAngularIntegratorThread
 
@@ -1589,13 +1843,6 @@ protected:
 	IntegrationWeight *weight_;
 	int point_count_total_;
 	double total_density_;
-
-	//ran0 az MC-hez
-	const static int ran_m_ = 2147483647, ran_a_ = 16807, ran_q_ = 127773, ran_r_ = 2836;
-	const static double M_RAN_INVM32_ = 2.32830643653869628906e-010;
-
-	int ran0(int* state);
-	double randd(double lbound, double ubound, int* state);
 
 public:
 	RadialAngularIntegratorThread(int ithread, int nthread,
@@ -1674,116 +1921,19 @@ RadialAngularIntegratorThread::~RadialAngularIntegratorThread()
 	delete[] nr_;
 }
 
-int
-RadialAngularIntegratorThread::ran0(int* state)
-{
-	int h = (*state) / ran_q_;
-	*state = ran_a_ * ((*state) - h * ran_q_) - h * ran_r_;
-
-	if (*state < 0) (*state) += ran_m_;
-	return *state;
-}
-
-double
-RadialAngularIntegratorThread::randd(double lbound, double ubound, int* state)
-{
-	int uiRan = ran0(state);
-	//stringstream ss;
-	//ss << uiRan << " * " << M_RAN_INVM32_ << " * " << (ubound-lbound) << " + " << lbound << " = " << uiRan * M_RAN_INVM32_ * (ubound-lbound) + lbound;
-	//throw runtime_error(ss.str());
-	return uiRan * M_RAN_INVM32_ * 2 * (ubound-lbound) + lbound;
-}
-
 void
 RadialAngularIntegratorThread::run()
 {
-	int icenter;
-	int nangular;
-	int ir, iangular;           // Loop indices for diff. integration dim
-	int point_count;            // Counter for # integration points per center
-	int nr;
-
-	SCVector3 center;           // Cartesian position of center
-	SCVector3 integration_point;
-
-	double w,radial_multiplier,angular_multiplier;
-	int deriv_order = (nuclear_gradient_==0?0:1);
-
-	int parallel_counter = 0;
-
-	stringstream sso, ssi;
-	sso << secure_getenv("HOME") << "/dev/mpqc-files/og.o";
-	//ssi << secure_getenv("HOME") << "/dev/mpqc-files/grid.i";
-	ofstream ofs(sso.str().c_str());
-	//ifstream ifs(ssi.str().c_str());
-
-	if(!ofs.is_open()) {
-		sso << " <- file cannot be opened for writing.";
-		throw std::runtime_error(sso.str());
-	}
-
-
-//     if(!ifs.is_open())
-//     {
-// 	ssi << " <- file cannot be opened for reading.";
-// 	throw std::runtime_error(ssi.str());
-//     }
-
-	ofs << "#nthread_: " << nthread_ << endl;
-	ofs << "#order: x y z density energy error acc" << endl;
-
+	MonteCarloIntegrator mc_integrator(mol_, this);
+	
 	mol_->move_to_coc();
 	mol_->transform_to_charge_principal_axes();
-
-	point_count_total_ = 0;
-	int point_count_max = 2000000;
-	double bound_size = 15.0;
-	int rstate = 567890123;
-	double point_den;
-	double n_e = mol_->total_charge();
-	double delta_e = 0.0005;
-	int acc = 0;
-	pair<double,double> q_e_pair; //charge,energy
-
-	ofs << "#number of electrons: " << n_e << endl;
-
-	while(acc < 10 && point_count_total_ < point_count_max ) {
-		integration_point.x() = randd(-bound_size,bound_size,&rstate);
-		integration_point.y() = randd(-bound_size,bound_size,&rstate);
-		integration_point.z() = randd(-bound_size,bound_size,&rstate);
-
-		ofs << setw(14) << integration_point.x() << " "
-		    << setw(14) << integration_point.y() << " "
-		    << setw(14) << integration_point.z() << " ";
-
-		q_e_pair = do_point(0, integration_point,
-		                    nuclear_gradient_, f_gradient_, w_gradient_);
-
-		ofs << setw(14) << point_den << " ";
-
-		total_density_ += q_e_pair.first;
-		value_ += q_e_pair.second;
-		++point_count_total_;
-
-		ofs << setw(14) << fabs((total_density_ * bound_size * bound_size * bound_size * 8 / point_count_total_) - n_e) << " ";
-
-		if(fabs((total_density_ * bound_size * bound_size * bound_size * 8 / point_count_total_) - n_e) < delta_e)
-			++acc;
-		else if(acc > 0)
-			--acc;
-
-		ofs << setw(14) << acc << endl;
-	}
-
-	w = bound_size * bound_size * bound_size * 8 / point_count_total_;
-
-	total_density_ = total_density_ * w;
-	value_ = value_ * w;
-
-	ofs << "#point_count_total_: " << point_count_total_ << endl;
-
-	//ifs.close();
-	ofs.close();
+	
+	MCResults results = mc_integrator.mc_integrate();
+	
+	total_density_ = results.charge;
+	value_ = results.energy;
+	point_count_total_ = results.point_count;
 }
 
 //////////////////////////////////////////////
