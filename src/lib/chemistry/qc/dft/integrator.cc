@@ -1624,10 +1624,10 @@ private:
 	
 	//miser state variables
 	int miser_calls_left_;
-	const static int miser_dim_ = 3;
+	const static int n_dim_ = 3;
 	
 	//miser
-	void miser_cut_sigma(	double *ubounds, double *lbound, 
+	bool miser_cut_sigma(	double *ubounds, double *lbound, 
 							vector<pair<double,double> > &values, vector<SCVector3> &coords, 
 							double *n_ubounds, double *n_lbounds, 
 							vector<pair<double,double> > &n_values, vector<SCVector3> &n_coords);
@@ -1643,7 +1643,7 @@ public:
 	MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int rstate = 567890123);
 	~MonteCarloIntegrator();
 		
-	MCResults miser_integrate();
+	MCResults miser_integrate(int calls);
 	MCResults mc_integrate();
 
 };
@@ -1697,26 +1697,30 @@ MonteCarloIntegrator::randd(double lbound, double ubound, int* state)
 	return uiRan * M_RAN_INVM32_ * 2 * (ubound-lbound) + lbound;
 }
 
-void
+bool
 MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds,
 										vector<pair<double,double> > &values, vector<SCVector3> &coords, 
 										double* n_ubounds, double* n_lbounds, 
 										vector<pair<double,double> > &n_values, vector<SCVector3> &n_coords)
 {
-	int max_dim;
+	int m = 0; //dimensoin with minimal sigma after cut
+	double cut_bounds[n_dim_];
+	double l_sigma[n_dim_];
+	double r_sigma[n_dim_];
 	
-	for(int i = 0; i < miser_dim_; ++i)
+	for(int i = 0; i < n_dim_; ++i)
 	{
-		double cut_bound = (ubounds[i]-lbounds[i])/2;
+		cut_bounds[i] = (ubounds[i]-lbounds[i])/2;
 		
 		int l_max_value = numeric_limits<int>::min();
 		int l_min_value = numeric_limits<int>::max();
 		int r_max_value = numeric_limits<int>::min();
 		int r_min_value = numeric_limits<int>::max();
 		
+		//estimating sigmas with delta
 		for(int j = 0; j < values.size(); ++j)
 		{
-			if(coords[j][i] > cut_bound)
+			if(coords[j][i] > cut_bounds[i])
 			{
 				if(values[j].first > l_max_value)
 					l_max_value = values[j].first;
@@ -1731,24 +1735,66 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds,
 					r_min_value = values[j].first;
 			}
 		}
+		
+		l_sigma[i] = l_max_value - l_min_value;
+		r_sigma[i] = r_max_value - r_min_value;
+
+		if(fabs(l_sigma[m]*l_sigma[m]+r_sigma[m]*r_sigma[m]) < fabs(l_sigma[i]*l_sigma[i]+r_sigma[i]*r_sigma[i]))
+			m = i;
 	}
 	
+	//should we make a cut?
+	if(fabs(l_sigma[m]*l_sigma[m]+r_sigma[m]*r_sigma[m]) < numeric_limits<double>::epsilon()*100)
+		return false;
+	
+	//cut according to minimum sigma
+	
+	vector<pair<double,double> > t_values;
+	vector<SCVector3> t_coords;
+	
+	for(int i = 0; i < values.size(); ++i)
+	{
+		if(coords[i][m] > cut_bounds[m])
+		{
+			n_values.push_back(values[m]);
+			n_coords.push_back(coords[m]);
+		}
+		else
+		{
+			t_values.push_back(values[m]);
+			t_coords.push_back(coords[m]);
+		}
+	}
+	
+	values = t_values;
+	coords = t_coords;
+	
+	//set new bounds
+	for(int i = 0; i < n_dim_; ++i)
+	{
+		n_lbounds[i] = lbounds[i];
+		n_ubounds[i] = ubounds[i];
+	}
+	n_lbounds[m] = cut_bounds[m];
+	ubounds[m] = cut_bounds[m];
+	
+	
+	return true;
 }
 
 MCResults
 MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth)
 {	
-	MCResults sum; 		
-
-	if(depth != 0)
+	MCResults sum; 
+	double n_ubounds[n_dim_];
+	double n_lbounds[n_dim_];
+	vector<pair<double,double> > n_values;
+	vector<SCVector3> n_coords;
+	
+	if(depth != 0 && miser_cut_sigma(ubounds, lbounds , values, coords, n_ubounds, n_lbounds, n_values, n_coords))
 	{
-		double n_ubounds[miser_dim_];
-		double n_lbounds[miser_dim_];
-		vector<pair<double,double> > n_values;
-		vector<SCVector3> n_coords;
 		
-		//miser_spray(ubounds, lbounds, values, );
-		miser_cut_sigma(ubounds, lbounds , values, coords, n_ubounds, n_lbounds, n_values, n_coords);
+		miser_spray(ubounds, lbounds, values, coords);
 		
 		MCResults temp_l = miser_recurse(ubounds, lbounds, values, coords, depth-1);
 		MCResults temp_r = miser_recurse(n_ubounds, n_lbounds, n_values, n_coords, depth-1);
@@ -1757,8 +1803,11 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, vector<pai
 	}
 	else
 	{
+		miser_spray(ubounds, lbounds, values, coords);
+
+		
 		double w = 1;
-		for(int i = 0; i < miser_dim_; ++i)
+		for(int i = 0; i < n_dim_; ++i)
 		{
 			w *= ubounds[i]-lbounds[i];
 		}
