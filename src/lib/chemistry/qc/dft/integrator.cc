@@ -1627,12 +1627,13 @@ private:
 	const static int n_dim_ = 3;
 	
 	//miser
+	void miser_spray(double *ubounds, double *lbounds, int calls, vector<pair<double,double> > &values, vector<SCVector3> &coords,);
 	bool miser_cut_sigma(	double *ubounds, double *lbound, 
 							vector<pair<double,double> > &values, vector<SCVector3> &coords, 
 							double *n_ubounds, double *n_lbounds, 
 							vector<pair<double,double> > &n_values, vector<SCVector3> &n_coords);
 					
-	MCResults miser_recurse(double *ubounds, double *lbounds, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth);
+	MCResults miser_recurse(double *ubounds, double *lbounds, int calls, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth);
 	
 	//IO
 	void init_ofs();
@@ -1698,9 +1699,9 @@ MonteCarloIntegrator::randd(double lbound, double ubound, int* state)
 }
 
 bool
-MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds,
+MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &calls,
 										vector<pair<double,double> > &values, vector<SCVector3> &coords, 
-										double* n_ubounds, double* n_lbounds, 
+										double* n_ubounds, double* n_lbounds, int &n_calls,
 										vector<pair<double,double> > &n_values, vector<SCVector3> &n_coords)
 {
 	int m = 0; //dimensoin with minimal sigma after cut
@@ -1778,12 +1779,15 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds,
 	n_lbounds[m] = cut_bounds[m];
 	ubounds[m] = cut_bounds[m];
 	
+	//set number of calls
+	n_calls = r_sigma(m)/(r_sigma[m]+l_sigma[m])*calls;
+	calls = calls-n_calls;
 	
 	return true;
 }
 
 MCResults
-MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth)
+MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, int calls, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth)
 {	
 	MCResults sum; 
 	double n_ubounds[n_dim_];
@@ -1791,10 +1795,11 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, vector<pai
 	vector<pair<double,double> > n_values;
 	vector<SCVector3> n_coords;
 	
-	if(depth != 0 && miser_cut_sigma(ubounds, lbounds , values, coords, n_ubounds, n_lbounds, n_values, n_coords))
+	if(depth != 0 && miser_cut_sigma(ubounds, lbounds , values, coords, n_ubounds, n_lbounds, n_values, n_coords) && calls >= 64)
 	{
-		
-		miser_spray(ubounds, lbounds, values, coords);
+		//Use 32 points for estimation
+		calls -= 32;
+		miser_spray(ubounds, lbounds, 32, values, coords);
 		
 		MCResults temp_l = miser_recurse(ubounds, lbounds, values, coords, depth-1);
 		MCResults temp_r = miser_recurse(n_ubounds, n_lbounds, n_values, n_coords, depth-1);
@@ -1803,8 +1808,7 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, vector<pai
 	}
 	else
 	{
-		miser_spray(ubounds, lbounds, values, coords);
-
+		miser_spray(ubounds, lbounds, calls, values, coords);
 		
 		double w = 1;
 		for(int i = 0; i < n_dim_; ++i)
@@ -1823,6 +1827,11 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, vector<pai
 	}
 	
 	return sum;
+}
+
+MCResults miser_integrate()
+{
+
 }
 
 MCResults MonteCarloIntegrator::mc_integrate()
