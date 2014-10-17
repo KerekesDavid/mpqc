@@ -1624,13 +1624,14 @@ private:
 	
 	//miser state variables
 	int miser_calls_left_;
+	int estimate_calls_;
 	const static int n_dim_ = 3;
 	
 	//miser
-	void miser_spray(double *ubounds, double *lbounds, int calls, vector<pair<double,double> > &values, vector<SCVector3> &coords,);
-	bool miser_cut_sigma(	double *ubounds, double *lbound, 
+	void miser_spray(double *ubounds, double *lbounds, int calls, vector<pair<double,double> > &values, vector<SCVector3> &coords);
+	bool miser_cut_sigma(	double *ubounds, double *lbound, int &calls,
 							vector<pair<double,double> > &values, vector<SCVector3> &coords, 
-							double *n_ubounds, double *n_lbounds, 
+							double *n_ubounds, double *n_lbounds, int &n_calls,
 							vector<pair<double,double> > &n_values, vector<SCVector3> &n_coords);
 					
 	MCResults miser_recurse(double *ubounds, double *lbounds, int calls, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth);
@@ -1641,7 +1642,7 @@ private:
 	
 public:
 
-	MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int rstate = 567890123);
+	MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int estimate_calls = 16, int rstate = 567890123);
 	~MonteCarloIntegrator();
 		
 	MCResults miser_integrate(int calls);
@@ -1649,8 +1650,8 @@ public:
 
 };
 
-MonteCarloIntegrator::MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int rstate)
-																	: mol_(mol), rait_(rait), rstate_(rstate)
+MonteCarloIntegrator::MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int estimate_calls, int rstate)
+																	: mol_(mol), rait_(rait), estimate_calls_(estimate_calls), rstate_(rstate)
 {
 	init_ofs();
 }
@@ -1737,6 +1738,11 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 			}
 		}
 		
+		if(l_max_value < l_min_value)
+			throw runtime_error("No points in left side");
+		if(r_max_value < r_min_value)
+			throw runtime_error("No points in right side");
+			
 		l_sigma[i] = l_max_value - l_min_value;
 		r_sigma[i] = r_max_value - r_min_value;
 
@@ -1780,29 +1786,31 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 	ubounds[m] = cut_bounds[m];
 	
 	//set number of calls
-	n_calls = r_sigma(m)/(r_sigma[m]+l_sigma[m])*calls;
+	n_calls = r_sigma[m]/(r_sigma[m]+l_sigma[m])*calls;
 	calls = calls-n_calls;
 	
 	return true;
 }
 
 MCResults
-MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, int calls, vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth)
+MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, int calls, 
+									vector<pair<double,double> > &values, vector<SCVector3> &coords, int depth)
 {	
 	MCResults sum; 
 	double n_ubounds[n_dim_];
 	double n_lbounds[n_dim_];
+	int n_calls;
 	vector<pair<double,double> > n_values;
 	vector<SCVector3> n_coords;
 	
-	if(depth != 0 && miser_cut_sigma(ubounds, lbounds , values, coords, n_ubounds, n_lbounds, n_values, n_coords) && calls >= 64)
+	if(depth != 0 && miser_cut_sigma(ubounds, lbounds , calls, values, coords, n_ubounds, n_lbounds, n_calls, n_values, n_coords) && calls >= estimate_calls_+2)
 	{
-		//Use 32 points for estimation
-		calls -= 32;
-		miser_spray(ubounds, lbounds, 32, values, coords);
+		//Use some points for estimation
+		calls -= estimate_calls_;
+		miser_spray(ubounds, lbounds, estimate_calls_, values, coords);
 		
-		MCResults temp_l = miser_recurse(ubounds, lbounds, values, coords, depth-1);
-		MCResults temp_r = miser_recurse(n_ubounds, n_lbounds, n_values, n_coords, depth-1);
+		MCResults temp_l = miser_recurse(ubounds, lbounds, calls, values, coords, depth-1);
+		MCResults temp_r = miser_recurse(n_ubounds, n_lbounds, n_calls, n_values, n_coords, depth-1);
 		
 		sum = temp_l + temp_r;
 	}
@@ -1824,14 +1832,41 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, int calls,
 		
 		sum.charge /= values.size();
 		sum.energy /= values.size();
+		sum.point_count = values.size();
 	}
 	
 	return sum;
 }
 
-MCResults miser_integrate()
-{
 
+void sc::MonteCarloIntegrator::miser_spray(double* ubounds, double* lbounds, int calls, 
+											vector<pair<double, double> >& values, vector<SCVector3>& coords)
+{
+	for(int i = 0;i < calls; ++i)
+	{
+		SCVector3 integration_point;
+		pair<double,double> q_e_pair;
+		
+		integration_point.x() = randd(lbounds[0],ubounds[0],&rstate_);
+		integration_point.y() = randd(lbounds[1],ubounds[1],&rstate_);
+		integration_point.z() = randd(lbounds[2],ubounds[2],&rstate_);
+
+		ofs_ << setw(14) << integration_point.x() << " "
+		    << setw(14) << integration_point.y() << " "
+		    << setw(14) << integration_point.z() << " ";
+
+		q_e_pair = rait_->do_point(integration_point);
+
+		ofs_ << setw(14) << q_e_pair.first << " ";
+		
+		values.push_back(q_e_pair);
+		coords.push_back(integration_point);
+	}
+}
+
+MCResults miser_integrate(int calls)
+{
+		
 }
 
 MCResults MonteCarloIntegrator::mc_integrate()
@@ -1842,7 +1877,6 @@ MCResults MonteCarloIntegrator::mc_integrate()
 	int point_count_total;
 	double total_density, value;
 	double bound_size = 15.0;
-	double point_den;
 	double n_e = mol_->total_charge();
 	double delta_e = 0.0005;
 	int acc = 0;
@@ -1861,7 +1895,7 @@ MCResults MonteCarloIntegrator::mc_integrate()
 
 		q_e_pair = rait_->do_point(integration_point);
 
-		ofs_ << setw(14) << point_den << " ";
+		ofs_ << setw(14) << q_e_pair.first << " ";
 
 		total_density += q_e_pair.first;
 		value += q_e_pair.second;
