@@ -1623,7 +1623,6 @@ private:
 	double randd(double lbound, double ubound, int *state);
 	
 	//miser state variables
-	int miser_calls_left_;
 	int estimate_calls_;
 	const static int n_dim_ = 3;
 	
@@ -1642,7 +1641,7 @@ private:
 	
 public:
 
-	MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int estimate_calls = 32, int rstate = 567890123);
+	MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int estimate_calls = 128, int rstate = 567890123);
 	~MonteCarloIntegrator();
 		
 	MCResults miser_integrate(int calls, int max_depth, double bounds);
@@ -1718,16 +1717,19 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 		double l_min_value = numeric_limits<double>::max();
 		double r_max_value = -numeric_limits<double>::max();
 		double r_min_value = numeric_limits<double>::max();
+		bool l_points, r_points;
 		
 		//estimating sigmas with delta
 		for(int j = 0; j < values.size(); ++j)
 		{
-			if(coords[j][i] > cut_bounds[i])
+			if(coords[j][i] < cut_bounds[i])
 			{
 				if(values[j].first >= l_max_value)
 					l_max_value = values[j].first;
 				if(values[j].first <= l_min_value)
 					l_min_value = values[j].first;
+					
+				l_points = true;
 			}
 			else
 			{
@@ -1735,10 +1737,12 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 					r_max_value = values[j].first;
 				if(values[j].first <= r_min_value)
 					r_min_value = values[j].first;
+					
+				r_points = true;
 			}
 		}
 		
-		if(l_max_value < l_min_value)
+		if(!l_points)
 		{
 			stringstream ss;
 			ss << "No points in left side." << endl << "values.size(): " << values.size()
@@ -1755,7 +1759,7 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 				
 			throw runtime_error(ss.str().c_str());
 		}
-		if(r_max_value < r_min_value)
+		if(!r_points)
 		{
 			stringstream ss;
 			ss << "No points in right side." << endl << "values.size(): " << values.size()
@@ -1773,16 +1777,21 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 			throw runtime_error(ss.str().c_str());
 		}
 			
-		l_sigma[i] = l_max_value - l_min_value;
-		r_sigma[i] = r_max_value - r_min_value;
+		l_sigma[i] = fabs(l_max_value - l_min_value);
+		r_sigma[i] = fabs(r_max_value - r_min_value);
 
-		if(fabs(l_sigma[m]*l_sigma[m]+r_sigma[m]*r_sigma[m]) < fabs(l_sigma[i]*l_sigma[i]+r_sigma[i]*r_sigma[i]))
+		if(l_sigma[m]*l_sigma[m]+r_sigma[m]*r_sigma[m] < l_sigma[i]*l_sigma[i]+r_sigma[i]*r_sigma[i])
 			m = i;
+		else if(fabs(l_sigma[m]*l_sigma[m]+r_sigma[m]*r_sigma[m] - l_sigma[i]*l_sigma[i]+r_sigma[i]*r_sigma[i]) <= numeric_limits<double>::epsilon());
+		{
+			if(randd(-1, 1, &rstate_) > 0)
+				m = i;
+		}
 	}
 	
 	//should we make a cut?
-	if(fabs(l_sigma[m]*l_sigma[m]+r_sigma[m]*r_sigma[m]) < numeric_limits<double>::epsilon()*100)
-		return false;
+	//if(fabs(l_sigma[m]*l_sigma[m]+r_sigma[m]*r_sigma[m]) < numeric_limits<double>::epsilon()*100)
+		//return false;
 	
 	//cut according to minimum sigma
 	
@@ -1793,13 +1802,13 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 	{
 		if(coords[i][m] > cut_bounds[m])
 		{
-			n_values.push_back(values[m]);
-			n_coords.push_back(coords[m]);
+			n_values.push_back(values[i]);
+			n_coords.push_back(coords[i]);
 		}
 		else
 		{
-			t_values.push_back(values[m]);
-			t_coords.push_back(coords[m]);
+			t_values.push_back(values[i]);
+			t_coords.push_back(coords[i]);
 		}
 	}
 	
@@ -1832,15 +1841,19 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, int calls,
 	int n_calls;
 	vector<pair<double,double> > n_values;
 	vector<SCVector3> n_coords;
-		
-	if(depth != 0 && miser_cut_sigma(ubounds, lbounds , calls, values, coords, n_ubounds, n_lbounds, n_calls, n_values, n_coords) && calls >= estimate_calls_+2)
+
+	if(depth != 0 && calls > estimate_calls_)
 	{
+		MCResults temp_l, temp_r;
+
 		//Use some points for estimation
 		miser_spray(ubounds, lbounds, estimate_calls_, values, coords);
 		calls -= estimate_calls_;
+				
+		miser_cut_sigma(ubounds, lbounds , calls, values, coords, n_ubounds, n_lbounds, n_calls, n_values, n_coords);
 		
-		MCResults temp_l = miser_recurse(ubounds, lbounds, calls, values, coords, depth-1);
-		MCResults temp_r = miser_recurse(n_ubounds, n_lbounds, n_calls, n_values, n_coords, depth-1);
+		temp_l = miser_recurse(ubounds, lbounds, calls, values, coords, depth-1);
+		temp_r = miser_recurse(n_ubounds, n_lbounds, n_calls, n_values, n_coords, depth-1);
 		
 		sum = temp_l + temp_r;
 	}
@@ -1873,6 +1886,9 @@ void
 MonteCarloIntegrator::miser_spray(double* ubounds, double* lbounds, int calls, 
 											vector<pair<double, double> >& values, vector<SCVector3>& coords)
 {
+	if(0 > calls)
+		throw runtime_error("calls < 0");
+	
 	for(int i = 0;i < calls; ++i)
 	{
 		SCVector3 integration_point;
@@ -1906,8 +1922,8 @@ MonteCarloIntegrator::miser_integrate(int calls, int max_depth, double bounds)
 	
 	for(int i = 0; i < n_dim_; ++i)
 	{
-		ubounds[i] = bounds;
-		lbounds[i] = -bounds;
+		ubounds[i] = bounds+3;
+		lbounds[i] = -bounds+3;
 	}
 	
 	miser_spray(ubounds, lbounds, estimate_calls_, values, coords);
@@ -2071,7 +2087,7 @@ RadialAngularIntegratorThread::run()
 	mol_->move_to_coc();
 	mol_->transform_to_charge_principal_axes();
 	
-	MCResults results = mc_integrator.miser_integrate(160000, 6, 15);
+	MCResults results = mc_integrator.miser_integrate(16000, 10, 10);
 	
 	total_density_ = results.charge;
 	value_ = results.energy;
