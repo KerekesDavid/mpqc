@@ -1783,7 +1783,7 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 			
 		l_sigma[i] = fabs(l_max_value - l_min_value);
 		r_sigma[i] = fabs(r_max_value - r_min_value);
-		comb_sigma[i] = l_sigma[m]*l_sigma[m]/l_points + r_sigma[i]*r_sigma[i]/r_points;
+		comb_sigma[i] = l_sigma[i]*l_sigma[i]/l_points + r_sigma[i]*r_sigma[i]/r_points;
 
 		if(comb_sigma[i] - comb_sigma[m] <= numeric_limits<double>::epsilon())
 		{
