@@ -35,7 +35,8 @@
 
 #include <vector>
 #include <limits>
-#include <math.h>
+#include <cmath>
+#include <ctime>
 
 using namespace std;
 using namespace sc;
@@ -1620,6 +1621,7 @@ private:
 	const static double M_RAN_INVM32_ = 2.32830643653869628906e-010;
 
 	//ran0 a MC-hoz
+	void rand_init(int rstate);
 	int ran0(int *state);
 	double randd(double lbound, double ubound, int *state);
 	
@@ -1642,7 +1644,7 @@ private:
 	
 public:
 
-	MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int rstate = 567890123);
+	MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int rstate = time(NULL));
 	~MonteCarloIntegrator();
 		
 	MCResults miser_integrate(int calls, int max_depth, int estimate_calls, double bounds);
@@ -1651,8 +1653,9 @@ public:
 };
 
 MonteCarloIntegrator::MonteCarloIntegrator(Molecule* mol, DenIntegratorThread* rait, int rstate)
-																	: mol_(mol), rait_(rait), rstate_(rstate)
+																	: mol_(mol), rait_(rait)
 {
+	rand_init(rstate);
 	init_ofs();
 }
 
@@ -1680,6 +1683,16 @@ void MonteCarloIntegrator::init_ofs()
 void MonteCarloIntegrator::dest_ofs()
 {
 	ofs_.close();
+}
+
+void
+MonteCarloIntegrator::rand_init(int rstate)
+{
+	rstate = 567890123 ^ rstate;
+	if(rstate == 0)
+		rstate = 567890123;
+	
+	rstate_ = rstate;
 }
 
 int
@@ -1767,8 +1780,8 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 		{
 			stringstream ss;
 			ss << "No points in right side." << endl << "values.size(): " << values.size()
-				<< " l_max_value: " << l_max_value
-				<< " l_min_value: " << l_min_value
+				<< " r_max_value: " << r_max_value
+				<< " r_min_value: " << r_min_value
 				<< " dim: " << i 
 				//<< " depth: " << depth
 				<< endl << "cut_bounds, lbounds, ubounds:" << endl;
@@ -1908,12 +1921,17 @@ MonteCarloIntegrator::miser_spray(double* ubounds, double* lbounds, int calls,
 	
 	for(int i = 0;i < calls; ++i)
 	{
+		const double bohr = 0.5291845266444409;
 		SCVector3 integration_point;
 		pair<double,double> q_e_pair;
 		
-		integration_point.x() = randd(lbounds[0],ubounds[0],&rstate_);
-		integration_point.y() = randd(lbounds[1],ubounds[1],&rstate_);
-		integration_point.z() = randd(lbounds[2],ubounds[2],&rstate_);
+		SCVector3 atom_r(mol_->r(0));
+		
+		//do{
+			integration_point.x() = randd(lbounds[0],ubounds[0],&rstate_);
+			integration_point.y() = randd(lbounds[1],ubounds[1],&rstate_);
+			integration_point.z() = randd(lbounds[2],ubounds[2],&rstate_);
+		//}while(integration_point.dist(atom_r) < bohr);
 
 		ofs_ << setw(14) << integration_point.x() << " "
 		    << setw(14) << integration_point.y() << " "
@@ -1928,7 +1946,7 @@ MonteCarloIntegrator::miser_spray(double* ubounds, double* lbounds, int calls,
 	}
 }
 
-MCResults 
+MCResults
 MonteCarloIntegrator::miser_integrate(int calls, int max_depth, int estimate_calls, double bounds)
 {
 	estimate_calls_ = estimate_calls;
@@ -1944,8 +1962,8 @@ MonteCarloIntegrator::miser_integrate(int calls, int max_depth, int estimate_cal
 		lbounds[i] = -bounds+3;
 	}
 	
-	miser_spray(ubounds, lbounds, estimate_calls_, values, coords);
-	calls -= estimate_calls_;
+	miser_spray(ubounds, lbounds, estimate_calls_*10, values, coords);
+	calls -= estimate_calls_*10;
 	
 	sum = miser_recurse(ubounds, lbounds, calls, values, coords, max_depth);
 
