@@ -1906,6 +1906,7 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, int calls,
 		sum.charge /= values.size() * w;
 		sum.energy /= values.size() * w;
 		sum.point_count = values.size();
+		
 	}
 	
 	return sum;
