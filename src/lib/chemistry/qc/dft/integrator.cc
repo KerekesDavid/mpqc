@@ -1899,12 +1899,12 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, int calls,
 		
 		for(int i = 0; i < values.size(); ++i)
 		{
-			sum.charge += values[i].first * w;
-			sum.energy += values[i].second * w;
+			sum.charge += values[i].first;
+			sum.energy += values[i].second;
 		}
 		
-		sum.charge /= values.size();
-		sum.energy /= values.size();
+		sum.charge /= values.size() * w;
+		sum.energy /= values.size() * w;
 		sum.point_count = values.size();
 	}
 	
@@ -1937,7 +1937,8 @@ MonteCarloIntegrator::miser_spray(double* ubounds, double* lbounds, int calls,
 		    << setw(14) << integration_point.y() << " "
 		    << setw(14) << integration_point.z() << " ";
 
-		q_e_pair = rait_->do_point(integration_point);
+		//q_e_pair = rait_->do_point(integration_point);
+		q_e_pair = pair<double,double>(1,1);
 
 		ofs_ << setw(14) << q_e_pair.first << endl;
 		
