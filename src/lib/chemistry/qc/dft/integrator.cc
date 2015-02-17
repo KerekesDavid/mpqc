@@ -1732,7 +1732,8 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 		double l_min_value = numeric_limits<double>::max();
 		double r_max_value = -numeric_limits<double>::max();
 		double r_min_value = numeric_limits<double>::max();
-		int l_points, r_points;
+		int l_points = 0;
+		int r_points = 0;
 		
 		//estimating sigmas with delta
 		for(int j = 0; j < values.size(); ++j)
@@ -1756,13 +1757,14 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 					
 				++r_points;
 					
-				}
+			}
 		}
 		
 		if(l_points <= 0)
 		{
 			stringstream ss;
 			ss << "No points in left side." << endl << "values.size(): " << values.size()
+				<< "l_points: " << l_points << endl
 				<< " l_max_value: " << l_max_value
 				<< " l_min_value: " << l_min_value
 				<< " dim: " << i 
@@ -1773,6 +1775,12 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 			{
 				ss << cut_bounds[i] << ", " << lbounds[i] << ", " << ubounds[i] << endl;
 			}
+			
+			ss << "points: " << endl;
+			for(int j = 0; j < values.size(); ++j)
+			{
+				ss << coords[j][1] << " " << coords[j][2] << " " << coords[j][3] << endl;
+			}
 				
 			throw runtime_error(ss.str().c_str());
 		}
@@ -1780,6 +1788,7 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 		{
 			stringstream ss;
 			ss << "No points in right side." << endl << "values.size(): " << values.size()
+				<< "r_points: " << r_points << endl
 				<< " r_max_value: " << r_max_value
 				<< " r_min_value: " << r_min_value
 				<< " dim: " << i 
@@ -1790,6 +1799,13 @@ MonteCarloIntegrator::miser_cut_sigma(	double* ubounds, double* lbounds, int &ca
 			{
 				ss << cut_bounds[i] << ", " << lbounds[i] << ", " << ubounds[i] << endl;
 			}
+			
+			ss << "points: " << endl;
+			for(int j = 0; j < values.size(); ++j)
+			{
+				ss << coords[j][1] << " " << coords[j][2] << " " << coords[j][3] << endl;
+			}
+				
 				
 			throw runtime_error(ss.str().c_str());
 		}
