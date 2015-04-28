@@ -1592,7 +1592,12 @@ struct MCResults
 	double energy;
 	int point_count;
 	
-	MCResults(){}
+	MCResults()
+	{
+		charge = 0;
+		energy = 0;
+		point_count = 0;
+	}
 	MCResults(double c, double e, int p_c):charge(c), energy(e), point_count(p_c){} 
 	
 	MCResults const operator+ (const MCResults &b)
@@ -1919,8 +1924,8 @@ MonteCarloIntegrator::miser_recurse(double* ubounds, double* lbounds, int calls,
 			sum.energy += values[i].second;
 		}
 		
-		sum.charge /= values.size() * w;
-		sum.energy /= values.size() * w;
+		sum.charge *= w / values.size();
+		sum.energy *= w / values.size();
 		sum.point_count = values.size();
 		
 	}
@@ -1935,7 +1940,7 @@ MonteCarloIntegrator::miser_spray(double* ubounds, double* lbounds, int calls,
 {
 	if(0 > calls)
 		throw runtime_error("calls < 0");
-	
+
 	for(int i = 0;i < calls; ++i)
 	{
 		const double bohr = 0.5291845266444409;
@@ -1954,8 +1959,8 @@ MonteCarloIntegrator::miser_spray(double* ubounds, double* lbounds, int calls,
 		    << setw(14) << integration_point.y() << " "
 		    << setw(14) << integration_point.z() << " ";
 
-		//q_e_pair = rait_->do_point(integration_point);
-		q_e_pair = pair<double,double>(1,1);
+		q_e_pair = rait_->do_point(integration_point);
+		//q_e_pair = pair<double,double>(1,1);
 
 		ofs_ << setw(14) << q_e_pair.first << endl;
 		
@@ -1976,8 +1981,8 @@ MonteCarloIntegrator::miser_integrate(int calls, int max_depth, int estimate_cal
 	
 	for(int i = 0; i < n_dim_; ++i)
 	{
-		ubounds[i] = bounds+3;
-		lbounds[i] = -bounds+3;
+		ubounds[i] = bounds+0.5;
+		lbounds[i] = -bounds+0.5;
 	}
 	
 	miser_spray(ubounds, lbounds, estimate_calls_*10, values, coords);
